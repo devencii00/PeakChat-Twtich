@@ -1,0 +1,29 @@
+{
+  "theme": "dark",
+  "sound": true,
+  "volume": 0.5,
+  "particles": true,
+  "default_sensitivity": "2.5x (Balanced)",
+  "chat_font": 17,
+  "tabs": [
+    {
+      "channel": "kaicenat",
+      "sens": "2.5x (Balanced)"
+    },
+    {
+      "channel": "asianjeff",
+      "sens": "2.5x (Balanced)"
+    },
+    {
+      "channel": "clix",
+      "sens": "2.5x (Balanced)"
+    },
+    {
+      "channel": "yourragegaming",
+      "sens": "2.5x (Balanced)"
+    }
+  ],
+  "active": 0,
+  "fullscreen": false,
+  "logs_folder": ""
+}
