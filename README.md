@@ -79,4 +79,4 @@ The app icon is `tweakchat.ico`; `peakchat.png` is used as the app's logo. Keep 
 
 ## License
 
-This repository does not currently include a `LICENSE` file. Add one to specify reuse and redistribution terms.
+PeakChat is licensed under the GNU Affero General Public License v3.0. See [LICENSE](LICENSE) for the full terms.
