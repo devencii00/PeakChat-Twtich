@@ -1,8 +1,0 @@
-{
-  "channel": "",
-  "script": "twitch_peakchat.py",
-  "autofix": true,
-  "autostart": true,
-  "close_after": true,
-  "channel_arg": false
-}

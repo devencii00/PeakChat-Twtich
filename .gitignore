@@ -1,0 +1,18 @@
+# Python environment and bytecode
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# App-generated runtime data
+/avatar_cache/
+/auto_saved/
+/twitch_logs/
+/settings.json
+/streamers.json
+/launcher_config.json
+/app_error.log
+/launcher_error.log
+
+# Temporary auto-save snapshots
+*.tmp
