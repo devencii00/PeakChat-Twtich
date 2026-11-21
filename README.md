@@ -17,6 +17,7 @@ PeakChat monitors public Twitch chat and highlights sudden activity spikes again
 - **Multiple streamer tabs** with saved channels, spike cards, and manual markers.
 - **VOD analysis** from a local ChatDownloader JSON file or a URL. Twitch VODs and clips, YouTube, and Kick URLs are supported through ChatDownloader.
 - **Progress and cancellation** for URL imports.
+- **Configurable spike auto-save** on a per-streamer toggle, with interval and destination settings. Saves are grouped by streamer and date; chat saving remains manual.
 - **CSV logs and exports** for chat and detected spikes.
 - **Customizable UI** with light/dark themes, fullscreen, animated background, chat font, and spike-sound settings.
 
@@ -53,6 +54,8 @@ The launcher installs the same dependencies automatically. Tkinter is included w
 5. Review spike cards and use the export controls to save results.
 
 Live chat and spike CSV logs are written under `twitch_logs` by default. Change the log location in **Settings**.
+
+Spike auto-save is off by default. Enable it from the Spike Detector panel and use its settings button to choose an interval (in minutes) and an optional destination. If no destination is selected, saves go under `auto_saved` beside the app. Each streamer gets `spikes` and `chats` folders, with dated subfolders such as `2026-1-1_spikes` and `2026-1-1_chat`. Spike snapshots are saved automatically; chat exports remain manual.
 
 ### Keyboard shortcuts
 

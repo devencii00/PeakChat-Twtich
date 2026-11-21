@@ -120,6 +120,8 @@ DEFAULT_SETTINGS = {
     "active": 0,
     "fullscreen": False,
     "logs_folder": "",
+    "auto_save_interval_minutes": 1,
+    "auto_save_folder": "",
 }
 SETTINGS: dict = dict(DEFAULT_SETTINGS)
 
@@ -298,6 +300,14 @@ def load_settings() -> dict:
         data["tabs"] = []
     if not isinstance(data["logs_folder"], str):
         data["logs_folder"] = ""
+    try:
+        data["auto_save_interval_minutes"] = max(
+            1, min(1440, int(data["auto_save_interval_minutes"])),
+        )
+    except (TypeError, ValueError):
+        data["auto_save_interval_minutes"] = 1
+    if not isinstance(data["auto_save_folder"], str):
+        data["auto_save_folder"] = ""
     data["fullscreen"] = bool(data.get("fullscreen", False))
     return data
 
@@ -1529,6 +1539,8 @@ class StreamTab:
         self._vod_cancel_event: threading.Event | None = None
         self._vod_job_id: str | None = None
         self._vod_progress_dialog = None
+        self._auto_save_enabled = False
+        self._auto_save_job = None
         self.cards: list = []
         self.floaters: list = []
         self._import_menu = None
@@ -1701,6 +1713,24 @@ class StreamTab:
             text_color="#FFFFFF", command=self._export_spikes,
         )
         self.foot_save.pack(side="left")
+        auto_save_controls = ctk.CTkFrame(footer, fg_color="transparent")
+        auto_save_controls.pack(side="right")
+        self.auto_save_btn = ctk.CTkButton(
+            auto_save_controls, text="Auto save: Off",
+            image=material_icon("content-save-outline", 15, P["text"]),
+            compound="left", height=30, width=128, corner_radius=8,
+            font=F(11, True), fg_color=P["gray_btn"], hover_color=P["gray_btn_hover"],
+            text_color=P["text"], command=self._toggle_auto_save,
+        )
+        self.auto_save_btn.pack(side="left")
+        self.auto_save_settings_btn = ctk.CTkButton(
+            auto_save_controls, text="",
+            image=material_icon("cog", 16, P["text"]),
+            width=30, height=30, corner_radius=8,
+            fg_color=P["gray_btn"], hover_color=P["gray_btn_hover"],
+            text_color=P["text"], command=self._open_auto_save_settings,
+        )
+        self.auto_save_settings_btn.pack(side="left", padx=(5, 0))
         self.spike_footer = footer
 
         self.spike_feed = ctk.CTkScrollableFrame(
@@ -1763,6 +1793,12 @@ class StreamTab:
             w.place_forget()
 
     def destroy(self):
+        if self._auto_save_job is not None:
+            try:
+                self.app.after_cancel(self._auto_save_job)
+            except tk.TclError:
+                pass
+            self._auto_save_job = None
         if self._vod_download_active:
             self._confirm_vod_cancel()
             self._finish_vod_download()
@@ -1796,6 +1832,7 @@ class StreamTab:
         except Exception:
             pass
         self._refresh_save_btn()
+        self._update_auto_save_button()
         self._update_toggle_button()
         if self._vod_progress_dialog is not None:
             self._vod_progress_dialog.on_theme_changed()
@@ -2610,22 +2647,134 @@ class StreamTab:
         if not path:
             return
         try:
-            with open(path, "w", newline="", encoding="utf-8") as f:
-                w = csv.writer(f)
-                w.writerow(["Start_Time", "End_Time", "Duration_s", "Peak", "Average", "Samples"])
-                for s in self.spikes.values():
-                    samples = "; ".join(
-                        f"{m.get('user', '?')}: {m.get('message', '')}"
-                        for m in s.get("samples", [])
-                    )
-                    w.writerow([
-                        s.get("start_vod", ""), s.get("end_vod", ""),
-                        s.get("duration", 0), s.get("peak", 0),
-                        s.get("average", 0), samples,
-                    ])
+            self._write_spikes_csv(path)
             self.set_status(f"Saved: {os.path.basename(path)}", "ok")
         except Exception as e:
             self.set_status(f"Export failed: {e}", "err")
+
+    def _write_spikes_csv(self, path: str):
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["Start_Time", "End_Time", "Duration_s", "Peak", "Average", "Samples"])
+            for spike in self.spikes.values():
+                samples = "; ".join(
+                    f"{message.get('user', '?')}: {message.get('message', '')}"
+                    for message in spike.get("samples", [])
+                )
+                writer.writerow([
+                    spike.get("start_vod", ""), spike.get("end_vod", ""),
+                    spike.get("duration", 0), spike.get("peak", 0),
+                    spike.get("average", 0), samples,
+                ])
+
+    def _auto_save_paths(self, moment: datetime | None = None) -> tuple[str, str, str]:
+        moment = moment or datetime.now()
+        streamer = self._channel_for_files().lower()
+        if not TWITCH_NAME_RE.fullmatch(streamer):
+            streamer = "session"
+        root = str(SETTINGS.get("auto_save_folder") or "").strip()
+        if not root:
+            root = os.path.join(BASE_DIR, "auto_saved")
+        else:
+            root = os.path.expandvars(os.path.expanduser(root))
+        date = f"{moment.year}-{moment.month}-{moment.day}"
+        streamer_root = os.path.join(root, streamer)
+        spikes_folder = os.path.join(streamer_root, "spikes", f"{date}_spikes")
+        chats_folder = os.path.join(streamer_root, "chats", f"{date}_chat")
+        return spikes_folder, chats_folder, date
+
+    def _toggle_auto_save(self):
+        if self._auto_save_enabled:
+            self._set_auto_save_enabled(False)
+            self.set_status("Spike auto-save off", "info")
+            return
+        if not self.picker.channel:
+            self.set_status("Choose a streamer before enabling auto-save", "warn")
+            return
+        try:
+            spikes_folder, chats_folder, _ = self._auto_save_paths()
+            os.makedirs(spikes_folder, exist_ok=True)
+            os.makedirs(chats_folder, exist_ok=True)
+        except OSError as e:
+            self.set_status(f"Auto-save folder error: {e}", "err")
+            return
+        self._set_auto_save_enabled(True)
+        self.set_status(
+            f"Spike auto-save on · every {SETTINGS['auto_save_interval_minutes']} min",
+            "ok",
+        )
+
+    def _set_auto_save_enabled(self, enabled: bool, persist: bool = True):
+        self._auto_save_enabled = bool(enabled)
+        if self._auto_save_job is not None:
+            try:
+                self.app.after_cancel(self._auto_save_job)
+            except tk.TclError:
+                pass
+            self._auto_save_job = None
+        if self._auto_save_enabled:
+            interval = max(1, int(SETTINGS["auto_save_interval_minutes"]))
+            self._auto_save_job = self.app.after(
+                interval * 60 * 1000, self._auto_save_spikes,
+            )
+        self._update_auto_save_button()
+        if persist:
+            self.app.save_state()
+
+    def _update_auto_save_button(self):
+        enabled = self._auto_save_enabled
+        self.auto_save_btn.configure(
+            text="Auto save: On" if enabled else "Auto save: Off",
+            fg_color=P["accent"] if enabled else P["gray_btn"],
+            hover_color=P["accent_hover"] if enabled else P["gray_btn_hover"],
+            text_color="#FFFFFF" if enabled else P["text"],
+            image=material_icon(
+                "content-save-outline", 15, "#FFFFFF" if enabled else P["text"],
+            ),
+        )
+        self.auto_save_settings_btn.configure(
+            fg_color=P["gray_btn"], hover_color=P["gray_btn_hover"],
+            text_color=P["text"], image=material_icon("cog", 16, P["text"]),
+        )
+
+    def _auto_save_spikes(self):
+        self._auto_save_job = None
+        if not self._auto_save_enabled or self._closed:
+            return
+        try:
+            if self.spikes:
+                spikes_folder, chats_folder, date = self._auto_save_paths()
+                os.makedirs(spikes_folder, exist_ok=True)
+                os.makedirs(chats_folder, exist_ok=True)
+                path = os.path.join(spikes_folder, f"{date}_spikes.csv")
+                temp_path = f"{path}.{uuid.uuid4().hex}.tmp"
+                try:
+                    self._write_spikes_csv(temp_path)
+                    os.replace(temp_path, path)
+                finally:
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
+                self.set_status(f"Auto-saved {len(self.spikes)} spikes", "ok")
+        except (OSError, csv.Error) as e:
+            self.set_status(f"Auto-save failed: {e}", "err")
+        finally:
+            if self._auto_save_enabled and not self._closed:
+                interval = max(1, int(SETTINGS["auto_save_interval_minutes"]))
+                self._auto_save_job = self.app.after(
+                    interval * 60 * 1000, self._auto_save_spikes,
+                )
+
+    def _open_auto_save_settings(self):
+        AutoSaveSettingsDialog(self.app, self)
+
+    def _refresh_auto_save_schedule(self):
+        if self._auto_save_enabled:
+            self._set_auto_save_enabled(True)
+
+    def _auto_save_settings_saved(self):
+        for tab in self.app.tabs.values():
+            tab._refresh_auto_save_schedule()
+        self.app.save_state()
 
     def _export_chat(self):
         # Prefer the live worker's current file
@@ -2639,9 +2788,15 @@ class StreamTab:
         if not os.path.exists(src):
             self.set_status("No chat log available", "warn")
             return
+        _, chats_folder, date = self._auto_save_paths()
+        try:
+            os.makedirs(chats_folder, exist_ok=True)
+        except OSError as e:
+            self.set_status(f"Chat folder error: {e}", "err")
+            return
         path = filedialog.asksaveasfilename(
             parent=self.app, defaultextension=".csv", filetypes=[("CSV", "*.csv")],
-            initialfile=f"{today_stamp()}_{self._channel_for_files()}_chat.csv",
+            initialdir=chats_folder, initialfile=f"{date}_chat.csv",
         )
         if not path:
             return
@@ -2818,6 +2973,115 @@ class ThemedConfirmationDialog(ctk.CTkToplevel):
     def _confirm(self, callback):
         self.destroy()
         callback()
+
+
+class AutoSaveSettingsDialog(ctk.CTkToplevel):
+    def __init__(self, app, tab: StreamTab):
+        super().__init__(app, fg_color=P["bg"])
+        self.app = app
+        self.tab = tab
+        self.title("Spike auto-save settings")
+        self.resizable(False, False)
+        self.transient(app)
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+        app.apply_window_icon(self)
+
+        ctk.CTkLabel(
+            self, text="Spike auto-save",
+            font=F(18, True), text_color=P["text"],
+        ).pack(anchor="w", padx=22, pady=(18, 3))
+        ctk.CTkLabel(
+            self, text="Save a fresh snapshot of detected spikes at a regular interval.",
+            font=F(12), text_color=P["sub"],
+        ).pack(anchor="w", padx=22, pady=(0, 14))
+
+        interval_row = ctk.CTkFrame(self, fg_color="transparent")
+        interval_row.pack(fill="x", padx=22, pady=(0, 14))
+        ctk.CTkLabel(
+            interval_row, text="Save every", font=F(12, True), text_color=P["text"],
+        ).pack(side="left")
+        self.interval_entry = ctk.CTkEntry(
+            interval_row, width=80, height=34, corner_radius=8, font=F(12),
+            fg_color=P["surface"], border_color=P["stroke"], text_color=P["text"],
+        )
+        self.interval_entry.insert(0, str(SETTINGS["auto_save_interval_minutes"]))
+        self.interval_entry.pack(side="left", padx=(10, 8))
+        ctk.CTkLabel(
+            interval_row, text="minutes (1–1440)", font=F(11), text_color=P["sub"],
+        ).pack(side="left")
+
+        ctk.CTkLabel(
+            self, text="Auto-save folder (leave blank to use the default)",
+            font=F(12, True), text_color=P["text"],
+        ).pack(anchor="w", padx=22, pady=(0, 6))
+        folder_row = ctk.CTkFrame(self, fg_color="transparent")
+        folder_row.pack(fill="x", padx=22)
+        self.folder_entry = ctk.CTkEntry(
+            folder_row, height=34, corner_radius=8, font=F(11),
+            fg_color=P["surface"], border_color=P["stroke"], text_color=P["text"],
+            placeholder_text=os.path.join(BASE_DIR, "auto_saved"),
+        )
+        self.folder_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        saved_folder = str(SETTINGS.get("auto_save_folder") or "")
+        if saved_folder:
+            self.folder_entry.insert(0, saved_folder)
+        ctk.CTkButton(
+            folder_row, text="Browse", width=82, height=34, corner_radius=8, font=F(11, True),
+            fg_color=P["gray_btn"], hover_color=P["gray_btn_hover"], text_color=P["text"],
+            command=self._browse_folder,
+        ).pack(side="right")
+
+        self.error_label = ctk.CTkLabel(
+            self, text="", font=F(11), text_color=P["red"],
+        )
+        self.error_label.pack(anchor="w", padx=22, pady=(8, 0))
+        buttons = ctk.CTkFrame(self, fg_color="transparent")
+        buttons.pack(fill="x", padx=22, pady=(10, 18))
+        ctk.CTkButton(
+            buttons, text="Cancel", width=100, height=34, corner_radius=8, font=F(11, True),
+            fg_color=P["gray_btn"], hover_color=P["gray_btn_hover"], text_color=P["text"],
+            command=self.destroy,
+        ).pack(side="right")
+        ctk.CTkButton(
+            buttons, text="Save settings", width=126, height=34, corner_radius=8, font=F(11, True),
+            fg_color=P["accent"], hover_color=P["accent_hover"], text_color="#FFFFFF",
+            command=self._save,
+        ).pack(side="right", padx=(0, 8))
+
+        app.center_dialog(self, 520, 292)
+        self.grab_set()
+        self.after(100, self.interval_entry.focus_set)
+
+    def _browse_folder(self):
+        current = self.folder_entry.get().strip() or BASE_DIR
+        folder = filedialog.askdirectory(
+            title="Choose auto-save folder",
+            initialdir=current if os.path.isdir(current) else BASE_DIR,
+            parent=self,
+        )
+        if folder:
+            self.folder_entry.delete(0, "end")
+            self.folder_entry.insert(0, folder)
+
+    def _save(self):
+        try:
+            interval = int(self.interval_entry.get().strip())
+        except ValueError:
+            self.error_label.configure(text="Enter a whole number of minutes.")
+            return
+        if not 1 <= interval <= 1440:
+            self.error_label.configure(text="Interval must be between 1 and 1440 minutes.")
+            return
+
+        folder = os.path.expandvars(os.path.expanduser(self.folder_entry.get().strip()))
+        if folder and os.path.exists(folder) and not os.path.isdir(folder):
+            self.error_label.configure(text="The selected auto-save path is not a folder.")
+            return
+
+        SETTINGS["auto_save_interval_minutes"] = interval
+        SETTINGS["auto_save_folder"] = folder
+        self.tab._auto_save_settings_saved()
+        self.destroy()
 
 
 # ---------------------------------------------------------------------------
@@ -3166,7 +3430,12 @@ class SpikeTrackerApp(ctk.CTk):
             sens = t.get("sens")
             if sens not in SENSITIVITY_OPTIONS:
                 sens = SETTINGS["default_sensitivity"]
-            self.new_tab(ch if TWITCH_NAME_RE.match(ch) else "", sens, activate=False)
+            self.new_tab(
+                ch if TWITCH_NAME_RE.match(ch) else "",
+                sens,
+                activate=False,
+                auto_save=bool(t.get("auto_save", False)),
+            )
         if not self.tab_order:
             self.new_tab(activate=False)
         idx = SETTINGS.get("active", 0)
@@ -3306,7 +3575,13 @@ class SpikeTrackerApp(ctk.CTk):
             self.empty_card.place(relx=0.5, rely=0.5, anchor="center")
 
     # --- tabs ---
-    def new_tab(self, channel: str = "", sens: str | None = None, activate: bool = True):
+    def new_tab(
+        self,
+        channel: str = "",
+        sens: str | None = None,
+        activate: bool = True,
+        auto_save: bool = False,
+    ):
         tab_id = uuid.uuid4().hex[:8]
         sens = sens if sens in SENSITIVITY_OPTIONS else SETTINGS["default_sensitivity"]
         chip = TabChip(self, tab_id)
@@ -3317,6 +3592,8 @@ class SpikeTrackerApp(ctk.CTk):
         tab.hide()
         if channel:
             tab.picker.commit(channel, silent=True)
+        if auto_save and channel:
+            tab._set_auto_save_enabled(True, persist=False)
         if activate:
             self.activate_tab(tab_id)
         else:
@@ -3385,6 +3662,7 @@ class SpikeTrackerApp(ctk.CTk):
             tabs_data.append({
                 "channel": tab.picker.channel or "",
                 "sens": tab.sensitivity_var.get(),
+                "auto_save": tab._auto_save_enabled,
             })
         SETTINGS["tabs"] = tabs_data
         active_idx = 0
